@@ -1,0 +1,194 @@
+import importlib
+import os
+import shutil
+import cv2
+import numpy as np
+
+# Load dynamically so static analyzers do not require pytesseract's type stubs.
+pytesseract = importlib.import_module("pytesseract")
+pytesseract.pytesseract.tesseract_cmd = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
+
+# Define folder paths
+INPUT_FOLDER = "input_sudoku"
+SOLVED_FOLDER = "solved_sudoku"
+
+# Ensure folders exist automatically when running the script
+os.makedirs(INPUT_FOLDER, exist_ok=True)
+os.makedirs(SOLVED_FOLDER, exist_ok=True)
+
+
+# --- PART 1: THE SOLVING LOGIC ---
+def is_valid_move(grid, row, col, num):
+  for x in range(9):
+    if grid[row][x] == num:
+      return False
+
+  for x in range(9):
+    if grid[x][col] == num:
+      return False
+
+  start_row = row - row % 3
+  start_col = col - col % 3
+  for i in range(3):
+    for j in range(3):
+      if grid[i + start_row][j + start_col] == num:
+        return False
+
+  return True
+
+
+def solve(grid, row, col):
+  if row == 8 and col == 9:
+    return True
+
+  if col == 9:
+    row += 1
+    col = 0
+
+  if grid[row][col] > 0:
+    return solve(grid, row, col + 1)
+
+  for num in range(1, 10):
+    if is_valid_move(grid, row, col, num):
+      grid[row][col] = num
+      if solve(grid, row, col + 1):
+        return True
+      grid[row][col] = 0  # Backtrack
+
+  return False
+
+
+# --- PART 2: THE IMAGE & OCR LOGIC ---
+def extract_grid_from_image(image_path):
+  img = cv2.imread(image_path)
+  if img is None:
+    raise FileNotFoundError(f"Could not load image from '{image_path}'.")
+
+  gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+  blur = cv2.GaussianBlur(gray, (5, 5), 0)
+  thresh = cv2.adaptiveThreshold(
+      blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+  )
+
+  contours, _ = cv2.findContours(
+      thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+  )
+  contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+  polygon = None
+  for c in contours:
+    area = cv2.contourArea(c)
+    if area > 1000:
+      peri = cv2.arcLength(c, True)
+      approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+      if len(approx) == 4:
+        polygon = approx
+        break
+
+  if polygon is None:
+    raise ValueError(
+        "Could not find a Sudoku grid contour in the image. Make sure the"
+        " puzzle is clear."
+    )
+
+  def reorder(pts):
+    pts = pts.reshape((4, 2))
+    new_pts = np.zeros((4, 1, 2), dtype=np.int32)
+    add = pts.sum(1)
+    new_pts[0] = pts[np.argmin(add)]
+    new_pts[2] = pts[np.argmax(add)]
+    diff = np.diff(pts, axis=1)
+    new_pts[1] = pts[np.argmin(diff)]
+    new_pts[3] = pts[np.argmax(diff)]
+    return new_pts
+
+  polygon = reorder(polygon)
+  pts1 = np.float32(polygon)
+  side = 450
+  pts2 = np.float32([[0, 0], [side, 0], [side, side], [0, side]])
+
+  matrix = cv2.getPerspectiveTransform(pts1, pts2)
+  warped = cv2.warpPerspective(gray, matrix, (side, side))
+
+  grid = []
+  cell_size = side // 9
+
+  for r in range(9):
+    row_values = []
+    for c in range(9):
+      margin = 4
+      cell = warped[
+          r * cell_size + margin : (r + 1) * cell_size - margin,
+          c * cell_size + margin : (c + 1) * cell_size - margin,
+      ]
+
+      cell = cv2.resize(cell, (28, 28))
+      _, cell_thresh = cv2.threshold(cell, 120, 255, cv2.THRESH_BINARY_INV)
+
+      if cv2.countNonZero(cell_thresh) < 15:
+        row_values.append(0)
+      else:
+        config = "--psm 10 -c tessedit_char_whitelist=123456789"
+        text = pytesseract.image_to_string(cell_thresh, config=config).strip()
+        digit = int(text) if text.isdigit() else 0
+        row_values.append(digit)
+
+    grid.append(row_values)
+
+  return grid
+
+
+# --- MAIN EXECUTION ---
+if __name__ == "__main__":
+  # Look for images inside the input_sudoku folder
+  valid_extensions = (".png", ".jpg", ".jpeg")
+  files = [
+      f
+      for f in os.listdir(INPUT_FOLDER)
+      if f.lower().endswith(valid_extensions)
+  ]
+
+  if not files:
+    print(
+        f"No screenshot found in the '{INPUT_FOLDER}/' folder. Please add one"
+        " and try again."
+    )
+  else:
+    # Process the first image found in the input folder
+    image_name = files[0]
+    image_path = os.path.join(INPUT_FOLDER, image_name)
+
+    try:
+      print(f"Reading Sudoku puzzle from '{image_path}'...")
+      extracted_grid = extract_grid_from_image(image_path)
+
+      print("\nExtracted Grid:")
+      for r in extracted_grid:
+        print(r)
+
+      # Create a backup copy of the grid for solving
+      grid_copy = [row[:] for row in extracted_grid]
+
+      print("\nSolving extracted grid...")
+      if solve(grid_copy, 0, 0):
+        print("\nSolved Solution:")
+        for row in grid_copy:
+          print(" ".join(str(cell) for cell in row))
+
+        # Successfully solved! Move file to the solved folder
+        destination_path = os.path.join(SOLVED_FOLDER, image_name)
+        shutil.move(image_path, destination_path)
+        print(
+            f"\nSuccess! Moved '{image_name}' to the '{SOLVED_FOLDER}/' folder."
+        )
+      else:
+        print(
+            "\nCould not solve the extracted grid (possible OCR read error)."
+            f" File '{image_name}' left in '{INPUT_FOLDER}/' for review."
+        )
+
+    except Exception as e:
+      print(f"Error: {e}")
