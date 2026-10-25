@@ -13,182 +13,244 @@ pytesseract.pytesseract.tesseract_cmd = (
 # Define folder paths
 INPUT_FOLDER = "input_sudoku"
 SOLVED_FOLDER = "solved_sudoku"
+SOLUTION_FOLDER = "sudoku_solution"
 
-# Ensure folders exist automatically when running the script
+# Ensure all folders exist automatically
 os.makedirs(INPUT_FOLDER, exist_ok=True)
 os.makedirs(SOLVED_FOLDER, exist_ok=True)
+os.makedirs(SOLUTION_FOLDER, exist_ok=True)
+
+
+def get_next_index(folder_path, prefix):
+    """Scans the folder to find the next sequential number for naming."""
+    existing_files = os.listdir(folder_path)
+    max_idx = 0
+    for f in existing_files:
+        if f.startswith(prefix):
+            name_without_ext, _ = os.path.splitext(f)
+            suffix = name_without_ext[len(prefix) :]
+            if suffix.isdigit():
+                max_idx = max(max_idx, int(suffix))
+    return max_idx + 1
 
 
 # --- PART 1: THE SOLVING LOGIC ---
 def is_valid_move(grid, row, col, num):
-  for x in range(9):
-    if grid[row][x] == num:
-      return False
+    for x in range(9):
+        if grid[row][x] == num:
+            return False
 
-  for x in range(9):
-    if grid[x][col] == num:
-      return False
+    for x in range(9):
+        if grid[x][col] == num:
+            return False
 
-  start_row = row - row % 3
-  start_col = col - col % 3
-  for i in range(3):
-    for j in range(3):
-      if grid[i + start_row][j + start_col] == num:
-        return False
+    start_row = row - row % 3
+    start_col = col - col % 3
+    for i in range(3):
+        for j in range(3):
+            if grid[i + start_row][j + start_col] == num:
+                return False
 
-  return True
+    return True
 
 
 def solve(grid, row, col):
-  if row == 8 and col == 9:
-    return True
-
-  if col == 9:
-    row += 1
-    col = 0
-
-  if grid[row][col] > 0:
-    return solve(grid, row, col + 1)
-
-  for num in range(1, 10):
-    if is_valid_move(grid, row, col, num):
-      grid[row][col] = num
-      if solve(grid, row, col + 1):
+    if row == 8 and col == 9:
         return True
-      grid[row][col] = 0  # Backtrack
 
-  return False
+    if col == 9:
+        row += 1
+        col = 0
+
+    if grid[row][col] > 0:
+        return solve(grid, row, col + 1)
+
+    for num in range(1, 10):
+        if is_valid_move(grid, row, col, num):
+            grid[row][col] = num
+            if solve(grid, row, col + 1):
+                return True
+            grid[row][col] = 0  # Backtrack
+
+    return False
 
 
 # --- PART 2: THE IMAGE & OCR LOGIC ---
 def extract_grid_from_image(image_path):
-  img = cv2.imread(image_path)
-  if img is None:
-    raise FileNotFoundError(f"Could not load image from '{image_path}'.")
+    img = cv2.imread(image_path)
+    if img is None:
+        raise FileNotFoundError(f"Could not load image from '{image_path}'.")
 
-  gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-  blur = cv2.GaussianBlur(gray, (5, 5), 0)
-  thresh = cv2.adaptiveThreshold(
-      blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
-  )
-
-  contours, _ = cv2.findContours(
-      thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-  )
-  contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
-  polygon = None
-  for c in contours:
-    area = cv2.contourArea(c)
-    if area > 1000:
-      peri = cv2.arcLength(c, True)
-      approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-      if len(approx) == 4:
-        polygon = approx
-        break
-
-  if polygon is None:
-    raise ValueError(
-        "Could not find a Sudoku grid contour in the image. Make sure the"
-        " puzzle is clear."
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    thresh = cv2.adaptiveThreshold(
+        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
     )
 
-  def reorder(pts):
-    pts = pts.reshape((4, 2))
-    new_pts = np.zeros((4, 1, 2), dtype=np.int32)
-    add = pts.sum(1)
-    new_pts[0] = pts[np.argmin(add)]
-    new_pts[2] = pts[np.argmax(add)]
-    diff = np.diff(pts, axis=1)
-    new_pts[1] = pts[np.argmin(diff)]
-    new_pts[3] = pts[np.argmax(diff)]
-    return new_pts
+    contours, _ = cv2.findContours(
+        thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
-  polygon = reorder(polygon)
-  pts1 = np.float32(polygon)
-  side = 450
-  pts2 = np.float32([[0, 0], [side, 0], [side, side], [0, side]])
+    polygon = None
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area > 1000:
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            if len(approx) == 4:
+                polygon = approx
+                break
 
-  matrix = cv2.getPerspectiveTransform(pts1, pts2)
-  warped = cv2.warpPerspective(gray, matrix, (side, side))
+    if polygon is None:
+        raise ValueError(
+            "Could not find a Sudoku grid contour in the image. Make sure the"
+            " puzzle is clear."
+        )
 
-  grid = []
-  cell_size = side // 9
+    def reorder(pts):
+        pts = pts.reshape((4, 2))
+        new_pts = np.zeros((4, 1, 2), dtype=np.int32)
+        add = pts.sum(1)
+        new_pts[0] = pts[np.argmin(add)]
+        new_pts[2] = pts[np.argmax(add)]
+        diff = np.diff(pts, axis=1)
+        new_pts[1] = pts[np.argmin(diff)]
+        new_pts[3] = pts[np.argmax(diff)]
+        return new_pts
 
-  for r in range(9):
-    row_values = []
-    for c in range(9):
-      margin = 4
-      cell = warped[
-          r * cell_size + margin : (r + 1) * cell_size - margin,
-          c * cell_size + margin : (c + 1) * cell_size - margin,
-      ]
+    polygon = reorder(polygon)
+    pts1 = np.float32(polygon)
+    side = 450
+    pts2 = np.float32([[0, 0], [side, 0], [side, side], [0, side]])
 
-      cell = cv2.resize(cell, (28, 28))
-      _, cell_thresh = cv2.threshold(cell, 120, 255, cv2.THRESH_BINARY_INV)
+    matrix = cv2.getPerspectiveTransform(pts1, pts2)
+    warped_gray = cv2.warpPerspective(gray, matrix, (side, side))
+    warped_color = cv2.warpPerspective(img, matrix, (side, side))
 
-      if cv2.countNonZero(cell_thresh) < 15:
-        row_values.append(0)
-      else:
-        config = "--psm 10 -c tessedit_char_whitelist=123456789"
-        text = pytesseract.image_to_string(cell_thresh, config=config).strip()
-        digit = int(text) if text.isdigit() else 0
-        row_values.append(digit)
+    grid = []
+    cell_size = side // 9
 
-    grid.append(row_values)
+    for r in range(9):
+        row_values = []
+        for c in range(9):
+            # Safer margin to avoid clipping digit edges or catching grid lines
+            margin = int(cell_size * 0.15)
+            cell = warped_gray[
+                r * cell_size + margin : (r + 1) * cell_size - margin,
+                c * cell_size + margin : (c + 1) * cell_size - margin,
+            ]
 
-  return grid
+            cell = cv2.resize(cell, (28, 28))
+            _, cell_thresh = cv2.threshold(cell, 140, 255, cv2.THRESH_BINARY_INV)
+
+            if cv2.countNonZero(cell_thresh) < 12:
+                row_values.append(0)
+            else:
+                config = "--psm 10 -c tessedit_char_whitelist=123456789"
+                text = pytesseract.image_to_string(cell_thresh, config=config).strip()
+                digit = int(text) if text.isdigit() else 0
+                row_values.append(digit)
+
+        grid.append(row_values)
+
+    return grid, warped_color
 
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-  # Look for images inside the input_sudoku folder
-  valid_extensions = (".png", ".jpg", ".jpeg")
-  files = [
-      f
-      for f in os.listdir(INPUT_FOLDER)
-      if f.lower().endswith(valid_extensions)
-  ]
+    valid_extensions = (".png", ".jpg", ".jpeg")
+    files = [
+        f
+        for f in os.listdir(INPUT_FOLDER)
+        if f.lower().endswith(valid_extensions)
+    ]
 
-  if not files:
-    print(
-        f"No screenshot found in the '{INPUT_FOLDER}/' folder. Please add one"
-        " and try again."
-    )
-  else:
-    # Process the first image found in the input folder
-    image_name = files[0]
-    image_path = os.path.join(INPUT_FOLDER, image_name)
-
-    try:
-      print(f"Reading Sudoku puzzle from '{image_path}'...")
-      extracted_grid = extract_grid_from_image(image_path)
-
-      print("\nExtracted Grid:")
-      for r in extracted_grid:
-        print(r)
-
-      # Create a backup copy of the grid for solving
-      grid_copy = [row[:] for row in extracted_grid]
-
-      print("\nSolving extracted grid...")
-      if solve(grid_copy, 0, 0):
-        print("\nSolved Solution:")
-        for row in grid_copy:
-          print(" ".join(str(cell) for cell in row))
-
-        # Successfully solved! Move file to the solved folder
-        destination_path = os.path.join(SOLVED_FOLDER, image_name)
-        shutil.move(image_path, destination_path)
+    if not files:
         print(
-            f"\nSuccess! Moved '{image_name}' to the '{SOLVED_FOLDER}/' folder."
+            f"No screenshot found in the '{INPUT_FOLDER}/' folder. Please add one"
+            " and try again."
         )
-      else:
-        print(
-            "\nCould not solve the extracted grid (possible OCR read error)."
-            f" File '{image_name}' left in '{INPUT_FOLDER}/' for review."
-        )
+    else:
+        image_name = files[0]
+        image_path = os.path.join(INPUT_FOLDER, image_name)
 
-    except Exception as e:
-      print(f"Error: {e}")
+        try:
+            print(f"Reading Sudoku puzzle from '{image_path}'...")
+            extracted_grid, warped_board = extract_grid_from_image(image_path)
+
+            print("\nExtracted Grid:")
+            for r in extracted_grid:
+                print(r)
+
+            original_grid = [row[:] for row in extracted_grid]
+            grid_copy = [row[:] for row in extracted_grid]
+
+            print("\nSolving extracted grid...")
+            if solve(grid_copy, 0, 0):
+                print("\nSolved successfully!")
+
+                # 1. Draw solved numbers onto the graphic board
+                side = warped_board.shape[0]
+                cell_size = side // 9
+
+                for r in range(9):
+                    for c in range(9):
+                        x1 = c * cell_size
+                        y1 = r * cell_size
+                        x2 = (c + 1) * cell_size
+                        y2 = (r + 1) * cell_size
+
+                        # Only draw on cells that were originally empty (0)
+                        if original_grid[r][c] == 0:
+                            val = str(grid_copy[r][c])
+                            text_x = x1 + int(cell_size * 0.32)
+                            text_y = y1 + int(cell_size * 0.72)
+
+                            # Clear background block for crisp green text
+                            cv2.rectangle(
+                                warped_board,
+                                (x1 + 3, y1 + 3),
+                                (x2 - 3, y2 - 3),
+                                (255, 255, 255),
+                                -1,
+                            )
+
+                            cv2.putText(
+                                warped_board,
+                                val,
+                                (text_x, text_y),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                1.0,
+                                (0, 150, 0),
+                                2,
+                                cv2.LINE_AA,
+                            )
+
+                # 2. Determine sequential names for both folders
+                solved_idx = get_next_index(SOLVED_FOLDER, "solved_sudoku_")
+                solution_idx = get_next_index(SOLUTION_FOLDER, "sudoku_solution_")
+
+                _, ext = os.path.splitext(image_name)
+
+                # Save solved screenshot graphic to 'sudoku_solution' folder
+                solution_filename = f"sudoku_solution_{solution_idx}.png"
+                solution_path = os.path.join(SOLUTION_FOLDER, solution_filename)
+                cv2.imwrite(solution_path, warped_board)
+                print(f"Solution graphic saved to: '{solution_path}'")
+
+                # Move and rename original screenshot to 'solved_sudoku' folder
+                solved_filename = f"solved_sudoku_{solved_idx}{ext}"
+                solved_path = os.path.join(SOLVED_FOLDER, solved_filename)
+                shutil.move(image_path, solved_path)
+                print(f"Original screenshot moved & renamed to: '{solved_path}'")
+
+            else:
+                print(
+                    "\nCould not solve the extracted grid (possible OCR read error)."
+                    f" File '{image_name}' left in '{INPUT_FOLDER}/' for review."
+                )
+
+        except Exception as e:
+            print(f"Error: {e}")
